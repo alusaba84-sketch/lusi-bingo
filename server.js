@@ -1180,14 +1180,14 @@ bot.onText(/\/play/,  msg => showMainMenu(msg.chat.id, msg.from.id, msg.from.fir
 
     else if(text === '🆘 24H Support 1'){
       bot.sendMessage(msg.chat.id,
-        `🆘 *24H Support*\n\nContact us anytime:\n👤 @Alu_Figaw_ye_12\n\nWe typically respond within a few minutes.`,
+        `🆘 *24H Support*\n\nContact us anytime:\n👤@Alu_Figaw_ye_12 \n\nWe typically respond within a few minutes.`,
         { parse_mode:'Markdown', reply_markup: MAIN_MENU }
       );
     }
 
     else if(text === '🆘 Support 2'){
       bot.sendMessage(msg.chat.id,
-        `🆘 *Support 2*\n\nAlternate support contact:\n👤 @YourSupportUsername2`,
+        `🆘 *Support 2*\n\nAlternate support contact:\n👤 @Alu_Figaw_ye_12`,
         { parse_mode:'Markdown', reply_markup: MAIN_MENU }
       );
     }
