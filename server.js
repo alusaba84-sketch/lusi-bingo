@@ -23,7 +23,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use('/audio', express.static(path.join(__dirname, 'audio')));
 app.use(express.json());
 
-const ADMIN_PHONE = '251995342389';
+const ADMIN_PHONE = '251900310944';
 function isAdminPhone(phone) {
   if (!phone) return false;
   const normalized = String(phone).replace(/^\+/, '');
@@ -60,28 +60,13 @@ if (process.env.DATABASE_URL) {
         const r = await this.q('SELECT * FROM users WHERE phone=$1', [phone]);
         return r[0] || null;
       },
-      async createUser(tid, name, phone, bonus = 0) {
-        // Sign-up bonus: only for a brand-new Telegram account whose phone number
-        // isn't already registered under another account (stops bonus farming).
-        let grant = bonus > 0 ? bonus : 0;
-        if (grant > 0) {
-          const dup = await this.getUserByPhone(phone);
-          if (dup && String(dup.telegram_id) !== String(tid)) grant = 0;
-        }
+      async createUser(tid, name, phone) {
         const r = await this.q(
-          `INSERT INTO users(telegram_id,name,phone,balance) VALUES($1,$2,$3,$4)
-           ON CONFLICT(telegram_id) DO UPDATE SET last_seen=NOW()
-           RETURNING *, (xmax = 0) AS inserted`,
-          [String(tid), name, phone, grant]
+          `INSERT INTO users(telegram_id,name,phone,balance) VALUES($1,$2,$3,0)
+           ON CONFLICT(telegram_id) DO UPDATE SET last_seen=NOW() RETURNING *`,
+          [String(tid), name, phone]
         );
-        const u = r[0];
-        // `inserted` is true only when this call created the row, so the bonus can never be paid twice
-        u.bonusGranted = (u.inserted && grant > 0) ? grant : 0;
-        if (u.bonusGranted > 0) {
-          try { await this.logTx(tid, 'bonus', u.bonusGranted, parseFloat(u.balance), 'signup_bonus'); }
-          catch (e) { console.error('bonus logTx:', e.message); }
-        }
-        return u;
+        return r[0];
       },
       async setBalance(tid, bal) {
         await this.q('UPDATE users SET balance=$1 WHERE telegram_id=$2', [bal, String(tid)]);
@@ -262,7 +247,6 @@ const CALL_INTERVAL_MS = 5000;
 const CLAIM_WINDOW_MS  = 4800;
 const CLAIM_COLLECT_MS = 700; // grace period to gather simultaneous BINGO claims
 const TOTAL_CARDS      = 400;
-const SIGNUP_BONUS     = Number.isFinite(parseFloat(process.env.SIGNUP_BONUS)) ? parseFloat(process.env.SIGNUP_BONUS) : 10; // ETB given on registration (set SIGNUP_BONUS=0 to disable)
 
 const STAKES = [
   { id:'st10', amount:10, maxPlayers:400 },
@@ -287,6 +271,9 @@ function generateFixedCard(idx) {
 const CARD_POOL=[];
 for(let i=1;i<=TOTAL_CARDS;i++) CARD_POOL.push({id:i,numbers:generateFixedCard(i)});
 const getCard=id=>CARD_POOL.find(c=>c.id===id);
+// Number of staked cards, worked out from the prize pool: pot is 80% of all stakes,
+// so full stakes = pot / 0.8, and cards = full stakes / stake amount. A player with 2 cards counts as 2.
+const stakedCards=room=>Math.round(room.pot/(1-HOUSE_CUT)/room.stake);
 
 // ─── WIN CHECK ───────────────────────────────────────────────
 function checkWin(nums, called, marked) {
@@ -406,13 +393,13 @@ async function startGame(room){
       send(p.ws,{type:'yourCard',
         cardId:p.cardId,cardNumbers:card?card.numbers:[],
         cardId2:p.cardId2||null,cardNumbers2:card2?card2.numbers:[],
-        pot:room.pot,playerCount:room.players.length,spectator:false});
+        pot:room.pot,playerCount:stakedCards(room),spectator:false});
     } else {
-      send(p.ws,{type:'spectating',pot:room.pot,playerCount:room.players.filter(p=>p.hasPaid).length,calledNumbers:room.calledNumbers});
+      send(p.ws,{type:'spectating',pot:room.pot,playerCount:stakedCards(room),calledNumbers:room.calledNumbers});
     }
   });
 
-  broadcast(room,{type:'gameStart',pot:room.pot,players:room.players.map(p=>({playerId:p.playerId,playerName:p.playerName}))});
+  broadcast(room,{type:'gameStart',pot:room.pot,playerCount:stakedCards(room),players:room.players.map(p=>({playerId:p.playerId,playerName:p.playerName}))});
   broadcastLobby(); scheduleNextCall(room);
 }
 
@@ -431,36 +418,6 @@ function callNumber(room){
   room.calledNumbers.push(drawn);
   broadcast(room,{type:'numberCalled',number:drawn,calledNumbers:room.calledNumbers,callCount:room.calledNumbers.length,claimWindowMs:CLAIM_WINDOW_MS});
   room.claimWindowOpen=true; scheduleNextCall(room);
-  runAutoPlay(room);
-}
-
-// ─── AUTO PLAY ───────────────────────────────────────────────
-// For every player who turned Auto Play on, mark all called numbers on their
-// card(s) server-side and, if a winning pattern is complete, file the BINGO
-// claim automatically. Works even if the player's connection dropped.
-function runAutoPlay(room){
-  if(room.status!=='playing') return;
-  const called=new Set(room.calledNumbers);
-  const markedOf=card=>card?card.numbers.reduce((a,n,i)=>{if(i!==12&&called.has(n))a.push(i);return a;},[]):[];
-  let claimed=false;
-  room.players.forEach(p=>{
-    if(!p.autoPlay||p.disqualified||(!p.cardId&&!p.cardId2)) return;
-    if(room.claimedThisRound.find(c=>c.playerId===p.playerId)) return;
-    const card1=p.cardId?getCard(p.cardId):null;
-    const card2=p.cardId2?getCard(p.cardId2):null;
-    const m1=markedOf(card1), m2=markedOf(card2);
-    const win1=card1&&checkWin(card1.numbers,room.calledNumbers,m1);
-    const win2=card2&&checkWin(card2.numbers,room.calledNumbers,m2);
-    if(!win1&&!win2) return;
-    room.claimedThisRound.push({playerId:p.playerId,markedIndices:m1,cardId2:p.cardId2||null,markedIndices2:m2});
-    send(p.ws,{type:'autoBingo'});
-    claimed=true;
-  });
-  if(claimed){
-    if(room.callTimer) clearTimeout(room.callTimer);
-    if(room.claimEvalTimer) clearTimeout(room.claimEvalTimer);
-    room.claimEvalTimer=setTimeout(()=>evaluateClaims(room),CLAIM_COLLECT_MS);
-  }
 }
 
 function evaluateClaims(room){
@@ -561,7 +518,7 @@ function leaveRoom(client){
   room.players=room.players.filter(p=>p.playerId!==client.playerId);
   client.roomId=null;
   if(room.players.length===0){if(room.callTimer)clearTimeout(room.callTimer);if(room.countdownTimer)clearInterval(room.countdownTimer);delete rooms[room.roomId];}
-  else{broadcastCardPool(room);broadcast(room,{type:'playerLeft',playerCount:room.players.length});}
+  else{broadcastCardPool(room);broadcast(room,{type:'playerLeft',playerCount:room.status==='playing'?stakedCards(room):room.players.length});}
   broadcastLobby();
 }
 
@@ -631,14 +588,12 @@ if(!ep&&msg.telegramId){
   }
   if(ep){
     ep.ws=ws; client.roomId=msg.roomId;
-    if(client.autoPlay===undefined) client.autoPlay=!!ep.autoPlay;
-    ep.autoPlay=!!client.autoPlay;
     const card=ep.cardId?getCard(ep.cardId):null;
     const card2=ep.cardId2?getCard(ep.cardId2):null;
     send(ws,{type:'reconnected',roomId:msg.roomId,stakeId:room.stakeId,
       cardId:ep.cardId,cardNumbers:card?card.numbers:[],
       cardId2:ep.cardId2||null,cardNumbers2:card2?card2.numbers:[],
-      calledNumbers:room.calledNumbers,pot:room.pot,playerCount:room.players.length,autoPlay:!!ep.autoPlay});
+      calledNumbers:room.calledNumbers,pot:room.pot,playerCount:stakedCards(room)});
   } else {
     send(ws,{type:'reconnectFailed'});
   }
@@ -652,10 +607,10 @@ if(!ep&&msg.telegramId){
           // ── If a game for this stake is already in progress, join as a spectator ──
           const liveRoom=Object.values(rooms).find(r=>r.stakeId===msg.stakeId&&r.status==='playing');
           if(liveRoom){
-            liveRoom.players.push({playerId:client.playerId,playerName:client.playerName,telegramId:client.telegramId,ws,cardId:null,hasPaid:false,disqualified:false,autoPlay:!!client.autoPlay});
+            liveRoom.players.push({playerId:client.playerId,playerName:client.playerName,telegramId:client.telegramId,ws,cardId:null,hasPaid:false,disqualified:false});
             client.roomId=liveRoom.roomId;
             send(ws,{type:'joinedRoom',roomId:liveRoom.roomId,stakeId:liveRoom.stakeId,balance:client.balance,status:liveRoom.status});
-            send(ws,{type:'spectating',pot:prizePoolOf(liveRoom),playerCount:liveRoom.players.filter(p=>p.hasPaid).length,calledNumbers:liveRoom.calledNumbers});
+            send(ws,{type:'spectating',pot:prizePoolOf(liveRoom),playerCount:stakedCards(liveRoom),calledNumbers:liveRoom.calledNumbers});
             broadcastLobby();
             break;
           }
@@ -663,7 +618,7 @@ if(!ep&&msg.telegramId){
           
           const room=getOrCreateRoom(msg.stakeId);
           if(room.status!=='waiting'&&room.status!=='countdown') return send(ws,{type:'error',message:'Game already running.'});
-          room.players.push({playerId:client.playerId,playerName:client.playerName,telegramId:client.telegramId,ws,cardId:null,cardId2:null,hasPaid:false,disqualified:false,autoPlay:!!client.autoPlay});
+          room.players.push({playerId:client.playerId,playerName:client.playerName,telegramId:client.telegramId,ws,cardId:null,cardId2:null,hasPaid:false,disqualified:false});
           client.roomId=room.roomId;
           send(ws,{type:'joinedRoom',roomId:room.roomId,stakeId:room.stakeId,balance:client.balance,status:room.status,playerCount:room.players.reduce((sum,p)=>(p.cardId?sum+1:sum)+(p.cardId2?1:0),0),stakeAmount:room.stake});
           broadcastCardPool(room); broadcastLobby();
@@ -745,17 +700,6 @@ break;
             send(ws,{type:'balanceUpdate',balance:client.balance});
             broadcastCardDiff(room,releasedIds); break;
           }
-          break;
-        }
-        case 'setAutoPlay':{
-          const on=!!msg.enabled;
-          client.autoPlay=on;
-          if(client.roomId){
-            const room=rooms[client.roomId];
-            const p=room&&room.players.find(p=>p.playerId===client.playerId);
-            if(p) p.autoPlay=on;
-          }
-          send(ws,{type:'autoPlaySet',enabled:on});
           break;
         }
         case 'claimBingo':{
@@ -1042,7 +986,7 @@ app.get('/api/user/:tid', async(req,res)=>{
 
 // ─── START ────────────────────────────────────────────────────
 server.listen(PORT,()=>{
-  console.log(`\n🎱 Lusi Bingo v5 on port ${PORT}\n`);
+  console.log(`\n🎱 Nati Bingo v5 on port ${PORT}\n`);
   startTelegramBot();
 });
 
@@ -1071,13 +1015,13 @@ function startTelegramBot(){
   const user = await loadUser(String(tid));
   if(user){
     bot.sendMessage(chatId,
-      `👋 Hi *${user.name}!*\nWelcome to *Lusi Bingo*, the ultimate bingo gaming experience! 🎉\n\n💰 Balance: *${parseFloat(user.balance).toFixed(2)} ETB*`,
+      `👋 Hi *${user.name}!*\nWelcome to *Nati Bingo*, the ultimate bingo gaming experience! 🎉\n\n💰 Balance: *${parseFloat(user.balance).toFixed(2)} ETB*`,
       { parse_mode:'Markdown', reply_markup: MAIN_MENU }
     );
   } else {
     pending[tid] = { step:'ask_phone', name: firstName || 'Player' };
     bot.sendMessage(chatId,
-      `👋 Hi *${firstName || 'Player'}!*\nWelcome to *Lusi Bingo!* 🎱\n\nPlease share your phone number to register:`,
+      `👋 Hi *${firstName || 'Player'}!*\nWelcome to *Nati Bingo!* 🎱\n\nPlease share your phone number to register:`,
       { parse_mode:'Markdown', reply_markup:{ keyboard:[[{ text:'📱 Share Phone Number', request_contact:true }]], resize_keyboard:true, one_time_keyboard:true }}
     );
   }
@@ -1119,7 +1063,7 @@ bot.onText(/\/play/,  msg => showMainMenu(msg.chat.id, msg.from.id, msg.from.fir
       if(!user) return bot.sendMessage(msg.chat.id, '⚠️ Please register first by pressing 📝 Register.', { reply_markup: MAIN_MENU });
       bot.sendMessage(msg.chat.id, `🎮 Tap below to open the game:`, {
         reply_markup:{
-          inline_keyboard:[[{ text:'🎮 Play Lusi Bingo', web_app:{ url:`${GAME_URL}?tid=${tid}` }}]]
+          inline_keyboard:[[{ text:'🎮 Play Nati Bingo', web_app:{ url:`${GAME_URL}?tid=${tid}` }}]]
         }
       });
     }
@@ -1173,21 +1117,21 @@ bot.onText(/\/play/,  msg => showMainMenu(msg.chat.id, msg.from.id, msg.from.fir
 
     else if(text === '📖 Instructions'){
       bot.sendMessage(msg.chat.id,
-        `📖 *How to Play Lusi Bingo*\n\n1️⃣ Deposit ETB into your wallet\n2️⃣ Choose a stake tier (10–100 ETB)\n3️⃣ Pick your lucky card (1–400)\n4️⃣ Numbers are called every 5 seconds\n5️⃣ Mark numbers on your card\n6️⃣ Complete a pattern and press *BINGO!* 🎉\n\n🏆 Winner gets *80%* of the total pot\n🏠 House takes *20%*\n⚠️ False BINGO = disqualification!`,
+        `📖 *How to Play Nati Bingo*\n\n1️⃣ Deposit ETB into your wallet\n2️⃣ Choose a stake tier (10–100 ETB)\n3️⃣ Pick your lucky card (1–400)\n4️⃣ Numbers are called every 5 seconds\n5️⃣ Mark numbers on your card\n6️⃣ Complete a pattern and press *BINGO!* 🎉\n\n🏆 Winner gets *80%* of the total pot\n🏠 House takes *20%*\n⚠️ False BINGO = disqualification!`,
         { parse_mode:'Markdown', reply_markup: MAIN_MENU }
       );
     }
 
     else if(text === '🆘 24H Support 1'){
       bot.sendMessage(msg.chat.id,
-        `🆘 *24H Support*\n\nContact us anytime:\n👤@Alu\\_Figaw\\_ye\\_12 \n\nWe typically respond within a few minutes.`,
+        `🆘 *24H Support*\n\nContact us anytime:\n👤 @YourSupportUsername1\n\nWe typically respond within a few minutes.`,
         { parse_mode:'Markdown', reply_markup: MAIN_MENU }
       );
     }
 
     else if(text === '🆘 Support 2'){
       bot.sendMessage(msg.chat.id,
-        `🆘 *Support 2*\n\nAlternate support contact:\n👤 @Alu\\_Figaw\\_ye\\_12`,
+        `🆘 *Support 2*\n\nAlternate support contact:\n👤 @YourSupportUsername2`,
         { parse_mode:'Markdown', reply_markup: MAIN_MENU }
       );
     }
@@ -1199,23 +1143,18 @@ bot.on('contact', async msg => {
     const phone = (msg.contact.phone_number||'').replace(/^\+/,'');
     const name  = msg.contact.first_name || msg.from.first_name || 'Player';
     delete pending[tid];
-    let balance = 0, bonus = 0;
+    let balance = 0;
     if(db){
       try{
-        const u = await db.createUser(String(tid), name, phone, SIGNUP_BONUS);
+        const u = await db.createUser(String(tid), name, phone);
         balance = parseFloat(u.balance);
-        bonus = u.bonusGranted || 0;
         userCache[String(tid)] = { name, phone, balance, isAdmin: isAdminPhone(phone) };
       } catch(e){ console.error('createUser error:', e.message); }
     } else {
-      const phoneTaken = Object.values(userCache).some(u=>u.phone===phone);
-      bonus = (SIGNUP_BONUS>0 && !phoneTaken) ? SIGNUP_BONUS : 0;
-      balance = bonus;
-      userCache[String(tid)] = { name, phone, balance, isAdmin: isAdminPhone(phone) };
+      userCache[String(tid)] = { name, phone, balance:0, isAdmin: isAdminPhone(phone) };
     }
-    const bonusLine = bonus>0 ? `\n🎁 Welcome bonus: *+${bonus} ETB* added to your wallet!` : '';
     bot.sendMessage(msg.chat.id,
-      `✅ *Registered Successfully!*\n\n👤 Name: *${name}*\n📱 Phone: ${phone}${bonusLine}\n💰 Balance: *${balance} ETB*\n\n${bonus>0?'Pick a stake and play with your bonus! 🎱':'Deposit ETB to start playing! 🎱'}`,
+      `✅ *Registered Successfully!*\n\n👤 Name: *${name}*\n📱 Phone: ${phone}\n💰 Balance: *${balance} ETB*\n\nDeposit ETB to start playing! 🎱`,
       { parse_mode:'Markdown', reply_markup: MAIN_MENU }
     );
   });
