@@ -923,7 +923,7 @@ if(pageParam === 'withdraw') setTimeout(()=>{ navGo('screenWallet','navWallet');
 
     case 'gameStart':
       document.getElementById('potVal').innerText=`${msg.pot} ETB`;
-      document.getElementById('playerCountVal').innerText=msg.players.length;
+      document.getElementById('playerCountVal').innerText=(msg.playerCount!==undefined?msg.playerCount:msg.players.length);
       resetTrackerBoard(); claimWindowOpen=false; setBingoBtn('idle'); calledNums=[];
       navGo('screenGame','navGame'); break;
 
