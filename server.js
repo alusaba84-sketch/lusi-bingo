@@ -1,5 +1,5 @@
 /**
- * Nati Bingo — Server v5
+ 
  * Changes:
  *  - 80% winner / 20% house cut
  *  - Disqualification only notifies the cheater (silent to others)
@@ -287,6 +287,9 @@ function generateFixedCard(idx) {
 const CARD_POOL=[];
 for(let i=1;i<=TOTAL_CARDS;i++) CARD_POOL.push({id:i,numbers:generateFixedCard(i)});
 const getCard=id=>CARD_POOL.find(c=>c.id===id);
+// Number of staked cards, worked out from the prize pool: pot is 80% of all stakes,
+// so full stakes = pot / 0.8, and cards = full stakes / stake amount. A player with 2 cards counts as 2.
+const stakedCards=room=>Math.round(room.pot/(1-HOUSE_CUT)/room.stake);
 
 // ─── WIN CHECK ───────────────────────────────────────────────
 function checkWin(nums, called, marked) {
@@ -406,13 +409,13 @@ async function startGame(room){
       send(p.ws,{type:'yourCard',
         cardId:p.cardId,cardNumbers:card?card.numbers:[],
         cardId2:p.cardId2||null,cardNumbers2:card2?card2.numbers:[],
-        pot:room.pot,playerCount:room.players.length,spectator:false});
+        pot:room.pot,playerCount:stakedCards(room),spectator:false});
     } else {
-      send(p.ws,{type:'spectating',pot:room.pot,playerCount:room.players.filter(p=>p.hasPaid).length,calledNumbers:room.calledNumbers});
+      send(p.ws,{type:'spectating',pot:room.pot,playerCount:stakedCards(room),calledNumbers:room.calledNumbers});
     }
   });
 
-  broadcast(room,{type:'gameStart',pot:room.pot,players:room.players.map(p=>({playerId:p.playerId,playerName:p.playerName}))});
+  broadcast(room,{type:'gameStart',pot:room.pot,playerCount:stakedCards(room),players:room.players.map(p=>({playerId:p.playerId,playerName:p.playerName}))});
   broadcastLobby(); scheduleNextCall(room);
 }
 
@@ -561,7 +564,7 @@ function leaveRoom(client){
   room.players=room.players.filter(p=>p.playerId!==client.playerId);
   client.roomId=null;
   if(room.players.length===0){if(room.callTimer)clearTimeout(room.callTimer);if(room.countdownTimer)clearInterval(room.countdownTimer);delete rooms[room.roomId];}
-  else{broadcastCardPool(room);broadcast(room,{type:'playerLeft',playerCount:room.players.length});}
+  else{broadcastCardPool(room);broadcast(room,{type:'playerLeft',playerCount:room.status==='playing'?stakedCards(room):room.players.length});}
   broadcastLobby();
 }
 
@@ -638,7 +641,7 @@ if(!ep&&msg.telegramId){
     send(ws,{type:'reconnected',roomId:msg.roomId,stakeId:room.stakeId,
       cardId:ep.cardId,cardNumbers:card?card.numbers:[],
       cardId2:ep.cardId2||null,cardNumbers2:card2?card2.numbers:[],
-      calledNumbers:room.calledNumbers,pot:room.pot,playerCount:room.players.length,autoPlay:!!ep.autoPlay});
+      calledNumbers:room.calledNumbers,pot:room.pot,playerCount:stakedCards(room),autoPlay:!!ep.autoPlay});
   } else {
     send(ws,{type:'reconnectFailed'});
   }
@@ -655,7 +658,7 @@ if(!ep&&msg.telegramId){
             liveRoom.players.push({playerId:client.playerId,playerName:client.playerName,telegramId:client.telegramId,ws,cardId:null,hasPaid:false,disqualified:false,autoPlay:!!client.autoPlay});
             client.roomId=liveRoom.roomId;
             send(ws,{type:'joinedRoom',roomId:liveRoom.roomId,stakeId:liveRoom.stakeId,balance:client.balance,status:liveRoom.status});
-            send(ws,{type:'spectating',pot:prizePoolOf(liveRoom),playerCount:liveRoom.players.filter(p=>p.hasPaid).length,calledNumbers:liveRoom.calledNumbers});
+            send(ws,{type:'spectating',pot:prizePoolOf(liveRoom),playerCount:stakedCards(liveRoom),calledNumbers:liveRoom.calledNumbers});
             broadcastLobby();
             break;
           }
