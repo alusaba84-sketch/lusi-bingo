@@ -1052,7 +1052,8 @@ server.listen(PORT,()=>{
 // ─── BOT ─────────────────────────────────────────────────────
 // ─── BOT ─────────────────────────────────────────────────────
 function startTelegramBot(){
-  const TOKEN=process.env.BOT_TOKEN, GAME_URL=process.env.GAME_URL||'https://panther-bingo.onrender.com';
+const TOKEN = process.env.BOT_TOKEN;
+const GAME_URL = process.env.GAME_URL || 'https://lusi-bingo.wasmer.app';
   if(!TOKEN){console.log('ℹ️ No BOT_TOKEN');return;}
   let Bot; try{Bot=require('node-telegram-bot-api');}catch(e){console.log('ℹ️ Bot lib missing');return;}
   const bot=new Bot(TOKEN,{polling:true}), pending={};
